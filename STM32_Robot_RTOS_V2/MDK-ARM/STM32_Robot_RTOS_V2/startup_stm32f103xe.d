@@ -1,0 +1,1 @@
+stm32_robot_rtos_v2\startup_stm32f103xe.o: startup_stm32f103xe.s
