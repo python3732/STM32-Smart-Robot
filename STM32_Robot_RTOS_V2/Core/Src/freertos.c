@@ -51,8 +51,8 @@ volatile int car_mode = 0;
 float global_gyro_offset = 0; 
 
 // 🔥🔥 全局调参变量 (蓝牙可改) 🔥🔥
-volatile float Kp_Track = 7.0f;  // P: 转向力度
-volatile float Kd_Track = 2.5f;  // D: 抑制震荡
+volatile float Kp_Track = 1.0f;  // P: 转向力度
+volatile float Kd_Track = 0.0f;  // D: 抑制震荡
 volatile int base_speed = 30;    // V: 基础速度
 /* USER CODE END Variables */
 osThreadId Task_MotorHandle;
@@ -114,50 +114,58 @@ void MX_FREERTOS_Init(void) {
 /* USER CODE BEGIN Header_StartMotorTask */
 void StartMotorTask(void const * argument)
 {
+	osThreadSuspend(NULL);
   for(;;)
   {
-    osDelay(1);
+    osDelay(1000);
   }
 }
 
 /* USER CODE BEGIN Header_StartLogicTask */
 /* USER CODE BEGIN StartLogicTask */
+
 void StartLogicTask(void const * argument)
 {
-  // === 1. 通用变量定义 ===
+  // ==========================================
+  // 1. 变量定义区
+  // ==========================================
+  
+  // MPU6050 相关
   int16_t gyro_z_raw = 0;
   float angle_z = 0;
   char msg[64];
   int i; 
 
-  // === 2. 避障模式变量 ===
+  // 避障模式变量
   volatile float dis_front = 0;
   volatile float dis_left = 0;
   volatile float dis_right = 0;
   float safe_distance = 15.0f;    
   float target_heading = 0; 
-  float Kp_Obstacle = 2.0f; // 避障走直线用的 P
+  float Kp_Obstacle = 2.0f; // 避障走直线用的纠偏力度
 
-  // === 3. 循迹模式变量 ===
+  // 循迹模式变量
   int tracking_error = 0;
   int last_tracking_error = 0;
-  // 注意：Kp_Track, Kd_Track, base_speed 现在是全局变量，在文件顶部定义
-  // 这样 StartComTask 才能通过蓝牙修改它们
+  // 注意：Kp_Track, Kd_Track, base_speed 是全局变量，在文件顶部定义
+  // 这样你可以通过蓝牙命令 (Pxx#, Vxx#) 实时修改它们
 
-  // === 4. 积分时间变量 ===
+  // 时间积分变量
   uint32_t last_tick = 0;
   uint32_t now_tick = 0;
   float dt = 0;
   float scale_factor = 1.0f; 
 
-  // === 5. 初始化流程 ===
+  // ==========================================
+  // 2. 初始化流程
+  // ==========================================
   MPU_Init();
   osDelay(500); 
 
   sprintf(msg, "System Ready! Calibrating...\r\n");
   HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), 100);
 
-  // 陀螺仪零偏校准
+  // 陀螺仪零偏校准 (静止 0.5s)
   float sum = 0;
   for(i = 0; i < 100; i++)
   {
@@ -171,7 +179,9 @@ void StartLogicTask(void const * argument)
   
   last_tick = HAL_GetTick();
 
-  // === 6. 主循环 ===
+  // ==========================================
+  // 3. 任务主循环
+  // ==========================================
   for(;;)
   {
     // ---------------------------
@@ -179,11 +189,13 @@ void StartLogicTask(void const * argument)
     // ---------------------------
     gyro_z_raw = MPU_Get_Gyro_Z();
     float gyro_z_corrected = gyro_z_raw - global_gyro_offset;
+    // 简单死区，消除静止漂移
     if(gyro_z_corrected > -50 && gyro_z_corrected < 50) gyro_z_corrected = 0;
 
     now_tick = HAL_GetTick();
     dt = (now_tick - last_tick) / 1000.0f;
     last_tick = now_tick;
+    // 防止 dt 异常过大
     if(dt > 0.1f) dt = 0.01f;
 
     angle_z += (gyro_z_corrected / 131.0f) * dt * scale_factor; 
@@ -194,7 +206,7 @@ void StartLogicTask(void const * argument)
     if (car_mode == 0)
     {
         // === 模式 0: 遥控待机 ===
-        // 什么都不做，完全听 StartComTask 的蓝牙指令
+        // 什么都不做，听 StartComTask 指挥
     }
     else if (car_mode == 1)
     {
@@ -205,7 +217,7 @@ void StartLogicTask(void const * argument)
 
         if (dis_front > 25.0f)
         {
-            // === 直行 + 陀螺仪纠偏 ===
+            // --- 直行 + 陀螺仪纠偏 ---
             float error = angle_z - target_heading;
             int turn_adjust = (int)(error * Kp_Obstacle);
 
@@ -218,15 +230,21 @@ void StartLogicTask(void const * argument)
 
             speed_left = left_motor; speed_right = right_motor;
             
-            // 前进方向
+			// 🔥🔥 方向引脚交换 🔥🔥
+            // 逻辑左轮(L) -> 控制 BIN (G9/D6)
+            // 逻辑右轮(R) -> 控制 AIN (D0/C11)
+            
+            // 左轮前进 (控制 BIN)
+            HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_SET);    
+            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_RESET);
+            
+            // 右轮前进 (控制 AIN)
             HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);    
             HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_RESET); 
-            HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_SET);    
-            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_RESET);  
         }
         else
         {
-            // === 遇到障碍处理 ===
+            // --- 遇到障碍 ---
             speed_left = 0; speed_right = 0;
             osDelay(500);
 
@@ -235,31 +253,30 @@ void StartLogicTask(void const * argument)
             Servo_Turn(20);  osDelay(600); dis_right = Get_Distance();
             Servo_Turn(90);  osDelay(300);
 
-            if (dis_left < safe_distance && dis_right < safe_distance)
+           if (dis_left < safe_distance && dis_right < safe_distance)
             {
-                // === 死胡同：倒车掉头 ===
-                HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_RESET); // 左退
-                HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_SET);
-                HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_RESET); // 右退
+                // 死胡同：倒车 (方向全反)
+                // 左轮后退(BIN)
+                HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_RESET); 
                 HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
+                // 右轮后退(AIN)
+                HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_RESET); 
+                HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_SET);
                 
                 speed_left = 50; speed_right = 50; HAL_Delay(500);
                 speed_left = 0; speed_right = 0; HAL_Delay(200);
 
-                // 右转 90 度 + 更新坐标
                 Auto_Turn(-90.0f); 
                 angle_z -= 90.0f; target_heading -= 90.0f; last_tick = HAL_GetTick();
             }
             else if (dis_left > dis_right)
             {
-                // 左转 90 度
-                Auto_Turn(90.0f);
+                Auto_Turn(90.0f); 
                 angle_z += 90.0f; target_heading += 90.0f; last_tick = HAL_GetTick();
             }
             else
             {
-                // 右转 90 度
-                Auto_Turn(-90.0f);
+                Auto_Turn(-90.0f); 
                 angle_z -= 90.0f; target_heading -= 90.0f; last_tick = HAL_GetTick();
             }
         }
@@ -267,64 +284,67 @@ void StartLogicTask(void const * argument)
     else if (car_mode == 2)
     {
         // ===========================
-        //      模式 2: 智能循迹 (含动态减速)
+        //      模式 2: PID 循迹 (暴力死区补偿版)
         // ===========================
         
         // 1. 获取误差
-        int raw_error = Get_Tracking_Error();
+        tracking_error = Get_Tracking_Error();
         
-        // (可选) 可以在这里加简单的消抖，但通常直接用反应最快
-        tracking_error = raw_error; 
-
         // 2. PID 计算
-        // pid_out 代表“转向力度”
         int pid_out = (int)(Kp_Track * tracking_error + Kd_Track * (tracking_error - last_tracking_error));
         last_tracking_error = tracking_error;
 
-        // 🔥🔥【核心优化】动态基础速度 🔥🔥
-        // 原理：如果转向力度(pid_out)很大，说明弯很急，必须减速！
-        // 算法：实际基准速度 = 设定基准速度 - (转向力度 * 系数)
-        // 系数 0.5 意味着：如果 pid_out 是 40 (急转)，速度就减掉 20。
-        int dynamic_base = base_speed - (abs(pid_out) / 2);
+        // 3. 计算初步速度
+        int motor_l = base_speed - pid_out; 
+        int motor_r = base_speed + pid_out;
         
-        // 兜底保护：速度不能减到 0 以下，否则车就停在弯道上了
-        // 给 15 作为最低蠕动速度
-        if (dynamic_base < 15) dynamic_base = 15; 
+        // 🔥🔥🔥【死区穿越逻辑】🔥🔥🔥
+        // 你的电机死区大概是 25。如果算出来的速度在 -25 到 25 之间，
+        // 电机不仅不动，还浪费了转向机会。
+        // 我们强制把它改成 -35，让它猛烈反转！
+        
+        int dead_zone = 25;     // 死区阈值 (根据你的电机情况调整)
+        int violent_kick = -35; // 强制反转速度 (越负越暴力)
 
-        // 3. 计算最终电机速度
-        // 左轮 = 动态基准 - 转向力度
-        // 右轮 = 动态基准 + 转向力度
-        // (注：如果之前的方向反了，请交换这里的加减号)
-        int motor_l = dynamic_base - pid_out; 
-        int motor_r = dynamic_base + pid_out;
-        
+        // 左轮检查
+        if (motor_l < dead_zone && motor_l > -dead_zone) 
+        {
+            motor_l = violent_kick; 
+        }
+
+        // 右轮检查
+        if (motor_r < dead_zone && motor_r > -dead_zone) 
+        {
+            motor_r = violent_kick; 
+        }
+
         // 4. 安全限幅
         if(motor_l > 90) motor_l = 90; if(motor_l < -90) motor_l = -90;
         if(motor_r > 90) motor_r = 90; if(motor_r < -90) motor_r = -90;
         
-        // 5. 写入电机 (支持原地反转 Tank Turn)
-        // 如果 motor_l 是负数，说明需要左轮倒转，辅助急转弯
+        // 5. 写入电机 (支持正反转)
         
-        // --- 左轮控制 ---
+       // 🔥🔥 方向引脚交换 🔥🔥
+        // --- 左轮 (控制 BIN) ---
         if(motor_l >= 0) {
-            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);    // 正转
-            HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_RESET); 
+            HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_SET);   // 正转
+            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_RESET);
             speed_left = motor_l;
         } else {
-            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_RESET);  // 反转
-            HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_SET); 
-            speed_left = -motor_l; // 取绝对值
+            HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_RESET); // 反转
+            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
+            speed_left = -motor_l;
         }
 
-        // --- 右轮控制 ---
+        // --- 右轮 (控制 AIN) ---
         if(motor_r >= 0) {
-            HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_SET);    // 正转
-            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);    // 正转
+            HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_RESET);
             speed_right = motor_r;
         } else {
-            HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_RESET);  // 反转
-            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_RESET);
-            speed_right = -motor_r; // 取绝对值
+            HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_RESET);  // 反转
+            HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_SET);
+            speed_right = -motor_r;
         }
     }
     else if (car_mode == 3)
@@ -332,26 +352,67 @@ void StartLogicTask(void const * argument)
         // ===========================
         //      模式 3: 传感器调试
         // ===========================
-        // 发送 8路传感器原始状态，方便你调节电位器屏蔽地板缝隙
+        // 把 8路数据发给手机看 (二进制字符串)
         char binary_str[10];
         uint8_t sensor = (uint8_t)(GPIOF->IDR & 0x00FF);
         
         for(int j=0; j<8; j++)
         {
-            // 如果第 (7-j) 位是 1，就填 '1'，否则填 '0'
-            if (sensor & (1 << (7-j))) 
-                binary_str[j] = '1';
-            else 
-                binary_str[j] = '0';
+            if (sensor & (1 << (7-j))) binary_str[j] = '1';
+            else binary_str[j] = '0';
         }
         binary_str[8] = '\n'; 
         binary_str[9] = '\0';
         
         HAL_UART_Transmit(&huart3, (uint8_t*)binary_str, 9, 100);
-        osDelay(500); // 半秒发一次，别刷屏太快
+        osDelay(500); 
+    }
+	else if (car_mode == 4)
+    {
+        // ===========================
+        //      模式 4: 砰砰控制 (无 PID 对照组)
+        // ===========================
+        // 原理：检测到那边有黑线，就死命往那边转，没有微调
+        
+        tracking_error = Get_Tracking_Error();
+        
+        // 笨蛋模式的速度通常要慢一点，否则直接飞出去
+        // 你可以通过对比：PID 跑 40 不飞，这个跑 25 就飞了 -> 证明 PID 强
+        int dumb_speed = 25; 
+        
+        // 1. 设置方向 (沿用你的软件换线逻辑：左控BIN，右控AIN)
+        // 两个轮子都默认正转
+        HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_RESET);
+
+        // 2. 简单粗暴的逻辑
+        if (tracking_error > 5) 
+        {
+            // --- 偏右太厉害，向左死转 ---
+            // 左轮停 (甚至倒转)，右轮转
+            speed_left = 0;   // 或者 -20
+            speed_right = dumb_speed + 10; 
+        }
+        else if (tracking_error < -5) 
+        {
+            // --- 偏左太厉害，向右死转 ---
+            // 左轮转，右轮停
+            speed_left = dumb_speed + 10;
+            speed_right = 0;  // 或者 -20
+        }
+        else
+        {
+            // --- 差不多在中间，直走 ---
+            speed_left = dumb_speed;
+            speed_right = dumb_speed;
+        }
+        
+        // 3. 安全限幅 (防止 PWM 溢出)
+        if(speed_left > 90) speed_left = 90; if(speed_left < -90) speed_left = -90;
+        if(speed_right > 90) speed_right = 90; if(speed_right < -90) speed_right = -90;
     }
 
-    osDelay(10); // 10ms 调度周期
+    osDelay(10); // 调度间隔
   }
 }
 /* USER CODE END StartLogicTask */
@@ -380,6 +441,7 @@ void StartComTask(void const * argument)
             case 'M': car_mode = 0; speed_left = 0; speed_right = 0; break; // 遥控
             case 'T': car_mode = 2; break; // 循迹
             case 'D': car_mode = 3; speed_left = 0; speed_right = 0; break; // 调试
+			case 'N': car_mode = 4; break;
             case '?': // 查询参数
                 sprintf(echo_msg, "P=%.1f, D=%.1f, V=%d\r\n", Kp_Track, Kd_Track, base_speed);
                 HAL_UART_Transmit(&huart3, (uint8_t*)echo_msg, strlen(echo_msg), 100);
@@ -388,17 +450,17 @@ void StartComTask(void const * argument)
             case 'S': if(!car_mode) { speed_left = 0; speed_right = 0; } break;
             case 'G': if(!car_mode) { 
                     speed_left = 50; speed_right = 50; 
-                    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
-                    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_RESET);
-                    HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_SET);
-                    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_RESET);
+                    // 左轮(BIN)正
+                    HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_SET); HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_RESET);
+                    // 右轮(AIN)正
+                    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_RESET);
                 } break;
             case 'B': if(!car_mode) { 
                     speed_left = 50; speed_right = 50; 
-                    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_RESET);
-                    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_SET);
-                    HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_RESET);
-                    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
+                    // 左轮(BIN)反
+                    HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
+                    // 右轮(AIN)反
+                    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_SET);
                 } break;
             case 'L': if(!car_mode) { speed_left = 0; speed_right = 60; } break;
             case 'R': if(!car_mode) { speed_left = 60; speed_right = 0; } break;
@@ -468,71 +530,122 @@ int16_t MPU_Get_Gyro_Z(void)
 
 void Auto_Turn(float target_angle)
 {
+    // ============================================
+    // 1. 变量初始化
+    // ============================================
     float accumulated_angle = 0;
     float dt = 0;
     uint32_t last_tick = HAL_GetTick();
     uint32_t now_tick;
     float target_abs = (target_angle > 0) ? target_angle : -target_angle;
 
-    // 参数：提前35度刹车，慢速40，快速60
+    // 🔥 安全保险丝：记录开始时间
+    // 如果转弯超过 2秒 (2000ms)，说明出问题了，强制退出
+    uint32_t start_time = HAL_GetTick(); 
+
+    // ============================================
+    // 2. 刹车策略配置
+    // ============================================
+    // 参数：提前 35度 刹车利用惯性 (根据地面摩擦力调整，地滑就改大，地涩就改小)
     float stop_offset = 35.0f; 
+    
+    // 🔥 小角度补丁：如果只需要转 20度，就不要提前刹车了，否则一步都不走
+    if (target_abs < stop_offset) stop_offset = 0;
+
     int speed_fast = 60;
     int speed_slow = 40;
     int current_speed = speed_fast;
 
-    if(target_angle > 0) { 
-        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_SET);
-        HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_RESET);
-    } else { 
-        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_RESET);
+    // ============================================
+    // 3. 设置电机方向 (原地坦克掉头)
+    // ============================================
+   if(target_angle > 0) { 
+        // 左转：左轮(BIN)退、右轮(AIN)进
         HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_RESET);
+    } else { 
+        // 右转：左轮(BIN)进、右轮(AIN)退
+        HAL_GPIO_WritePin(GPIOG, GPIO_PIN_9, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_SET);
     }
 
+    // ============================================
+    // 4. 循环积分控制
+    // ============================================
     while(accumulated_angle < (target_abs - stop_offset)) 
     {
+        // 🔥🔥【关键修改】超时保护 🔥🔥
+        // 如果线松了或者卡住了，超过 2000ms 还没转完，强制跳出！
+        if ((HAL_GetTick() - start_time) > 2000) break;
+
+        // --- 陀螺仪积分逻辑 ---
         int16_t gyro = MPU_Get_Gyro_Z();
         float speed = gyro - global_gyro_offset; 
+        
+        // 动态死区过滤
         if(speed > -50 && speed < 50) speed = 0;
         
         now_tick = HAL_GetTick();
         dt = (now_tick - last_tick) / 1000.0f;
         last_tick = now_tick;
+        
+        // 防止 dt 异常
         if(dt > 0.1f) dt = 0.01f;
 
+        // 计算这一瞬间转过的角度 (取绝对值累加)
         float angle_step = (speed / 131.0f) * dt; 
         if(angle_step < 0) angle_step = -angle_step;
         accumulated_angle += angle_step;
 
+        // --- 速度规划 ---
+        // 离目标还有 40度 时，减速慢行，防止冲过头
         if ((target_abs - accumulated_angle) < 40.0f) current_speed = speed_slow; 
-        speed_left = current_speed; speed_right = current_speed;
-        osDelay(5); 
+        
+        speed_left = current_speed; 
+        speed_right = current_speed;
+        
+        // --- RTOS 调度 ---
+        osDelay(5); // 让出 CPU 给蓝牙任务
     }
+
+    // ============================================
+    // 5. 刹车与缓冲
+    // ============================================
     speed_left = 0; speed_right = 0;
-    HAL_Delay(800); 
+    
+    // 使用 osDelay 而不是 HAL_Delay，保证刹车期间蓝牙不掉线
+    osDelay(800); 
 }
 
 // 8路循迹误差计算
 int Get_Tracking_Error(void)
 {
-    // 假设黑线输出 1 (高电平)
     uint8_t sensor = (uint8_t)(GPIOF->IDR & 0x00FF);
     static int last_known_error = 0;
-    int error = 0;
-    int sensor_count = 0;
     
-    // PF0(最左) 权重-4, PF7(最右) 权重+4
-    if (sensor & 0x01) { error -= 4; sensor_count++; } // PF0
-    if (sensor & 0x02) { error -= 3; sensor_count++; } // PF1
-    if (sensor & 0x04) { error -= 2; sensor_count++; } // PF2
-    if (sensor & 0x08) { error -= 1; sensor_count++; } // PF3
-    if (sensor & 0x10) { error += 1; sensor_count++; } // PF4
-    if (sensor & 0x20) { error += 2; sensor_count++; } // PF5
-    if (sensor & 0x40) { error += 3; sensor_count++; } // PF6
-    if (sensor & 0x80) { error += 4; sensor_count++; } // PF7
+    int error_sum = 0;   // 累加和
+    int sensor_count = 0; // 触发个数
     
+    // 1. 权重扩大 10 倍，保留小数点后一位的精度
+    // PF0(-40), PF1(-30) ... PF7(+40)
+    if (sensor & 0x01) { error_sum -= 40; sensor_count++; } 
+    if (sensor & 0x02) { error_sum -= 30; sensor_count++; } 
+    if (sensor & 0x04) { error_sum -= 20; sensor_count++; } 
+    if (sensor & 0x08) { error_sum -= 10; sensor_count++; } 
+    if (sensor & 0x10) { error_sum += 10; sensor_count++; } 
+    if (sensor & 0x20) { error_sum += 20; sensor_count++; } 
+    if (sensor & 0x40) { error_sum += 30; sensor_count++; } 
+    if (sensor & 0x80) { error_sum += 40; sensor_count++; } 
+    
+    // 2. 丢失目标处理
     if (sensor_count == 0) return last_known_error; 
 
-    last_known_error = error;
-    return error;
+    // 3. 【关键修改】求平均值 (重心法)
+    int final_error = error_sum / sensor_count;
+
+    // 4. 这里的 error 范围变成了 -40 到 +40
+    // 所以你的 PID 参数 Kp 需要相应地除以 10 (或者调小一点)，否则车会晃得很厉害
+    last_known_error = final_error;
+    return final_error;
 }
 /* USER CODE END 4 */

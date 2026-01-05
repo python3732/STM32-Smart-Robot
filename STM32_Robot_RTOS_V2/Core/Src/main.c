@@ -126,8 +126,8 @@ int main(void)
   // ==========================================
   // 5. 初始化全局变量
   // ==========================================
-  speed_left = 50;
-  speed_right = 50;
+  speed_left = 0;
+  speed_right = 0;
   car_mode = 0; // 默认遥控模式
 
   // 设置默认电机方向 (往前)
@@ -216,30 +216,38 @@ void delay_us(uint16_t us)
 float Get_Distance(void)
 {
     float distance = 0;
-    uint32_t time_cnt = 0;
-
+    
+    // 1. 发送触发信号
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_8, GPIO_PIN_SET); 
-    delay_us(20); 
+    delay_us(20); // 这里的微秒延时要短，尽量不要用 osDelay
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_8, GPIO_PIN_RESET);
 
-    uint32_t timeout = 1000000;
+    // 2. 清零计数器，准备开始
+    __HAL_TIM_SET_COUNTER(&htim2, 0);
+
+    // 3. 等待高电平出现 (Echo 变高)
+    // 只要计数器还在 500us (约8cm) 以内，就死等高电平
+    // 如果超过这个时间还没高电平，说明传感器坏了
     while(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_RESET)
     {
-        timeout--;
-        if(timeout == 0) return 999.0; 
+        if(__HAL_TIM_GET_COUNTER(&htim2) > 500) return 999.0; 
     }
 
-    __HAL_TIM_SET_COUNTER(&htim2, 0); 
+    // 4. 重置计数器，开始测量脉宽
+    __HAL_TIM_SET_COUNTER(&htim2, 0);
 
-    timeout = 1000000;
+    // 5. 等待高电平结束 (Echo 变低)
+    // 🔥🔥 关键修改：用定时器计数值来做超时 🔥🔥
+    // 假设定时器是 1us 计数一次。30000us = 30ms。
+    // 30ms 大概能测 5米远。如果超过 30ms 还没变低，说明没障碍物。
     while(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_SET)
     {
-        timeout--;
-        if(timeout == 0) return 999.0;
+        if(__HAL_TIM_GET_COUNTER(&htim2) > 30000) return 999.0; // 30ms 超时返回
     }
 
-    time_cnt = __HAL_TIM_GET_COUNTER(&htim2);
-    distance = time_cnt / 58.0f;
+    // 6. 计算距离
+    uint32_t time_cnt = __HAL_TIM_GET_COUNTER(&htim2);
+    distance = time_cnt / 58.8f;
 
     return distance;
 }
@@ -260,16 +268,16 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
       // === 左电机 (EN_A) ===
       // 使用宏定义 EN_A_Pin，而不是猜的数字
       if(pwm_count < speed_left) 
-          HAL_GPIO_WritePin(GPIOD, EN_A_Pin, GPIO_PIN_SET); 
+          HAL_GPIO_WritePin(GPIOD, EN_B_Pin, GPIO_PIN_SET); 
       else 
-          HAL_GPIO_WritePin(GPIOD, EN_A_Pin, GPIO_PIN_RESET);
+          HAL_GPIO_WritePin(GPIOD, EN_B_Pin, GPIO_PIN_RESET);
 
       // === 右电机 (EN_B) ===
       // 使用宏定义 EN_B_Pin
       if(pwm_count < speed_right) 
-          HAL_GPIO_WritePin(GPIOD, EN_B_Pin, GPIO_PIN_SET); 
+          HAL_GPIO_WritePin(GPIOD, EN_A_Pin, GPIO_PIN_SET); 
       else 
-          HAL_GPIO_WritePin(GPIOD, EN_B_Pin, GPIO_PIN_RESET);
+          HAL_GPIO_WritePin(GPIOD, EN_A_Pin, GPIO_PIN_RESET);
   }
 }
 /* USER CODE END 4 */
